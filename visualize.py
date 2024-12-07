@@ -22,38 +22,48 @@ def preprocess_image(image_path, size=(128, 128)):
         img_tensor = torch.tensor(img_array.transpose(2, 0, 1), dtype=torch.float32)
     return img_tensor.unsqueeze(0)
 
-def visualize_model_output(model, device, image_path, grid_size=32, threshold=0.5):
-    """
-    Visualizes the output of the occupancy network.
 
-    Args:
-        model: Trained occupancy network.
-        device: Torch device (CPU or CUDA).
-        image_path: Path to the input image.
-        grid_size: Number of points per dimension in the 3D grid.
-        threshold: Occupancy threshold for Marching Cubes.
-    """
+def visualize_model_output(model, device, image_path, grid_size=64, threshold=0.5):
     image_tensor = preprocess_image(image_path).to(device)
 
-    # Define the 3D grid
+    # Save preprocessed image for inspection
+    from torchvision.utils import save_image
+    save_image(image_tensor, 'preprocessed_image.png')
+
     x = np.linspace(-1, 1, grid_size)
     y = np.linspace(-1, 1, grid_size)
     z = np.linspace(-1, 1, grid_size)
     grid = np.stack(np.meshgrid(x, y, z), axis=-1).reshape(-1, 3)
-
     grid_tensor = torch.tensor(grid, dtype=torch.float32).unsqueeze(0).to(device)
+    print(f"Image tensor shape: {image_tensor.shape}")
+    print(f"Grid tensor shape: {grid_tensor.shape}")
+
     with torch.no_grad():
-        occupancies = model(image_tensor, grid_tensor).cpu().numpy().squeeze()
+        occupancies = model(image_tensor, grid_tensor).detach().cpu().numpy().squeeze()
+        print(f"Occupancies shape: {occupancies.shape}")
+        print(f"Occupancies min: {occupancies.min()}, max: {occupancies.max()}")
+        print(f"Occupancies mean: {occupancies.mean()}, std: {occupancies.std()}")
+        # Visualize raw occupancies
+        import matplotlib.pyplot as plt
+        # Visualize raw occupancies
+        plt.imshow(occupancies.reshape(grid_size, grid_size, grid_size).sum(axis=2))
+        plt.savefig('occupancy_slice.png')
 
-    volume = occupancies.reshape(grid_size, grid_size, grid_size)
+        volume = occupancies.reshape(grid_size, grid_size, grid_size)
 
-    vertices, faces, normals, _ = marching_cubes(volume, level=threshold)
-    vertices = (vertices / (grid_size - 1)) * 2 - 1
-
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_normals=normals)
-    mesh.show()
-    mesh.export('output_mesh.obj')
-    print("Mesh saved to output_mesh.obj")
+        for threshold in [0.1, 0.3, 0.5, 0.7, 0.9]:
+            try:
+                vertices, faces, normals, _ = marching_cubes(volume, level=threshold)
+                print(f"Marching cubes successful with threshold {threshold}")
+                vertices = (vertices / (grid_size - 1)) * 2 - 1
+                mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_normals=normals)
+                mesh.show()
+                mesh.export('output_mesh.obj')
+                print("Mesh saved to output_mesh.obj")
+            except ValueError as e:
+                print(f"Error in marching cubes: {e}")
+                print(f"Marching cubes failed with threshold {threshold}: {e}")
+                print("Try adjusting the threshold or check if the occupancy predictions are valid.")
 
 # Initialize the model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -62,7 +72,9 @@ model = OccupancyNetwork(latent_dim)
 
 # Load the saved model weights
 checkpoint_path = "./Output/model_epoch_100.pt"
-model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+checkpoint = torch.load(checkpoint_path, map_location=device)
+model.load_state_dict(checkpoint['model_state_dict'])
+print(f"Checkpoint loaded from {checkpoint_path}")
 model.eval()
 model.to(device)
 

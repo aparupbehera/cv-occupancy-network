@@ -1,12 +1,13 @@
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, RandomHorizontalFlip, RandomRotation
-from occupancy_network import OccupancyNetwork
+from occupancy_network import OccupancyNetwork, add_weight_decay
 from dataset import SmallDataset
 import os
 
-def train_occupancy_network(data_dir, output_dir, num_epochs=100, batch_size=4, latent_dim=512, lr=1e-4):
+def train_occupancy_network(data_dir, output_dir, num_epochs=100, batch_size=8, latent_dim=512, lr=1e-4):
     # Data Augmentation
     image_transforms = Compose([
         RandomHorizontalFlip(p=0.5),
@@ -26,12 +27,19 @@ def train_occupancy_network(data_dir, output_dir, num_epochs=100, batch_size=4, 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
+
+    weight_decay = 1e-5
+    parameters = add_weight_decay(model, weight_decay)
+    optimizer = optim.Adam(parameters, lr=lr)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
+
     # Training Loop
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0.0
 
-        for images, points, occupancies in train_loader:
+        for batch_idx, (images, points, occupancies) in enumerate(train_loader):
             images, points, occupancies = images.to(device), points.to(device), occupancies.to(device)
             optimizer.zero_grad()
             
@@ -39,19 +47,32 @@ def train_occupancy_network(data_dir, output_dir, num_epochs=100, batch_size=4, 
             outputs = model(images, points)
             outputs = outputs.squeeze(-1)  # Remove extra dimension
             loss = model.compute_loss(outputs, occupancies)
+            print(f"Loss: {loss.item()}, Outputs mean: {outputs.mean().item()}, Targets mean: {occupancies.mean().item()}")
             
             # Backward pass
             loss.backward()
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    print(f"{name}: {param.grad.abs().mean()}")
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             epoch_loss += loss.item()
 
-        print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}")
+            if batch_idx % 10 == 0:
+                print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_idx}/{len(train_loader)}], Loss: {loss.item():.4f}")
 
-        # Save Checkpoint
+        scheduler.step(epoch_loss)
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {epoch_loss / len(train_loader):.4f}")
+
         if (epoch + 1) % 10 == 0:
             checkpoint_path = os.path.join(output_dir, f'model_epoch_{epoch + 1}.pt')
-            torch.save(model.state_dict(), checkpoint_path)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_loss,
+            }, checkpoint_path)
             print(f"Saved checkpoint: {checkpoint_path}")
 
     print("Training Complete!")
